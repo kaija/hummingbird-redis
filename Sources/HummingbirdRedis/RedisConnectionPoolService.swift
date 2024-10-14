@@ -16,6 +16,8 @@ import Foundation
 import Hummingbird
 import Logging
 import NIOCore
+import NIOSSL
+import NIOPosix
 import RediStack
 import ServiceLifecycle
 
@@ -27,8 +29,25 @@ public struct RedisConnectionPoolService: Service, @unchecked Sendable {
         eventLoopGroupProvider: EventLoopGroupProvider = .singleton,
         logger: Logger
     ) {
-        let configuration: RedisConnectionPool.Configuration = .init(config, logger: logger)
         let eventLoop = eventLoopGroupProvider.eventLoopGroup.any()
+        let redisTLSClient: ClientBootstrap? = {
+            guard let tlsConfig = config.tlsConfiguration,
+            let tlsHost = config.tlsHostname else { return nil }
+            return ClientBootstrap(group: eventLoop)
+                .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
+                .channelInitializer { channel in
+                    do {
+                        let sslContext = try NIOSSLContext(configuration: tlsConfig)
+                        return EventLoopFuture.andAllSucceed([
+                            channel.pipeline.addHandler(try NIOSSLClientHandler(context: sslContext, serverHostname: tlsHost)),
+                            channel.pipeline.addBaseRedisHandlers()
+                        ], on: channel.eventLoop)
+                    } catch {
+                            return channel.eventLoop.makeFailedFuture(error)
+                        }
+                    }
+                }()
+        let configuration: RedisConnectionPool.Configuration = .init(config, logger: logger, customClient: redisTLSClient)
         self.pool = .init(configuration: configuration, boundEventLoop: eventLoop)
     }
 
